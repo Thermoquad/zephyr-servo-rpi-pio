@@ -6,7 +6,7 @@ config PWM_SERVO_RPI_PICO_PIO
 	default y
 	depends on DT_HAS_RASPBERRYPI_PICO_PWM_SERVO_PIO_ENABLED
 	depends on PIO_RPI_PICO
-	select PWM
+	depends on PWM
 	help
 	  Enable the PIO-based servo PWM driver for RP2040/RP2350.
 	  Uses one PIO state machine per servo channel with 1µs resolution.
