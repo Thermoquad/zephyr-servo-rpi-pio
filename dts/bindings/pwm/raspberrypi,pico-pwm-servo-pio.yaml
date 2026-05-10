@@ -1,0 +1,42 @@
+# Copyright (c) 2026 Thermoquad
+# SPDX-License-Identifier: Apache-2.0
+
+description: |
+  PIO-based servo PWM driver for Raspberry Pi Pico (RP2040/RP2350).
+  Uses one PIO state machine to generate a servo-compatible PWM signal
+  with 1µs resolution. Supports standard (50Hz) and high-frequency
+  digital servos (up to 333Hz).
+
+  The node must be a child of a PIO node (&pio0, &pio1, or &pio2).
+
+  Example:
+    &pio1 {
+      status = "okay";
+
+      servo_pio: servo-pwm {
+        compatible = "raspberrypi,pico-pwm-servo-pio";
+        gpios = <&gpio0 2 GPIO_ACTIVE_HIGH>;
+        #pwm-cells = <3>;
+        status = "okay";
+      };
+    };
+
+compatible: "raspberrypi,pico-pwm-servo-pio"
+
+include: [pwm-controller.yaml]
+
+properties:
+  gpios:
+    type: phandle-array
+    required: true
+    description: |
+      GPIO pin to use for the servo PWM output. Only the pin number is
+      used — flags are ignored (PIO controls the pin directly).
+
+  "#pwm-cells":
+    const: 3
+
+pwm-cells:
+  - channel
+  - period
+  - flags
