@@ -156,11 +156,6 @@ static int servo_pio_init(const struct device *dev)
 	pio_sm_init(pio, sm, offset, &sm_config);
 	pio_sm_set_enabled(pio, sm, true);
 
-	/* Load initial 50Hz / 1500µs center position */
-	uint32_t pulse = 1500 - 2;
-	uint32_t low = (20000 - 1500) - 5;
-	pio_sm_put_blocking(pio, sm, (low << 16) | pulse);
-
 	return 0;
 }
 
