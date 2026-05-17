@@ -25,33 +25,48 @@ struct servo_pio_data {
 };
 
 /*
- * PIO program: servo PWM with 1µs resolution.
+ * Continuous PWM PIO program.
  *
- * The SM pulls a 32-bit word from the TX FIFO:
- *   bits [31:16] = low time in ticks (µs)
- *   bits [15:0]  = pulse width in ticks (µs)
+ * Packed 32-bit pulse descriptor pulled from TX FIFO each cycle:
+ *   bits[15:0]  = high-time delay   = pulse_us - 3
+ *   bits[31:16] = low-time delay    = low_us   - 6
  *
- * Out shift is right-first (LSB first), autopull disabled.
- * After pull, we shift out 16 bits to X (pulse), then 16 bits to Y (low).
+ * `pull noblock` refreshes OSR from the FIFO; if FIFO is empty it copies
+ * scratch X back into OSR. `mov x, osr` re-caches the descriptor after
+ * the pull, so a single pushed value re-circulates forever and pushing
+ * a new value transparently updates the pulse on the next cycle.
  *
- * Assembly (wrap_target=0, wrap=6):
- *   0: pull block         ; wait for new pulse/period data
- *   1: out  x, 16         ; x = pulse width ticks
- *   2: out  y, 16         ; y = low time ticks
- *   3: set  pins, 1       ; drive pin high
- *   4: jmp  x--, 4        ; delay x+1 cycles (pulse width)
- *   5: set  pins, 0       ; drive pin low
- *   6: jmp  y--, 6        ; delay y+1 cycles (low time)
- *                          ; wraps back to 0
+ * `set pindirs, 1` at the top of every cycle keeps the pin in output
+ * mode independent of how the host-side init helpers interact with
+ * SMx_INSTR.
+ *
+ * Out shift right (LSB first), autopull disabled, clock = 1 µs/tick.
+ *
+ * NOTE: A `jmp y--, N` placed at WRAP would conflict with the wrap rule
+ * (wrap overrides jump destination), so the pull/cache pair sits at the
+ * end of the program and the delay loops live in the interior.
+ *
+ * Assembly (wrap_target=0, wrap=8):
+ *   0: set  pindirs, 1   ; pin direction = output
+ *   1: out  y, 16        ; Y := high-time delay
+ *   2: set  pins, 1      ; drive pin high
+ *   3: jmp  y--, 3       ; high-delay loop
+ *   4: out  y, 16        ; Y := low-time delay
+ *   5: set  pins, 0      ; drive pin low
+ *   6: jmp  y--, 6       ; low-delay loop
+ *   7: pull noblock      ; OSR := FIFO entry, or X if FIFO empty
+ *   8: mov  x, osr       ; cache descriptor; wraps to 0
  */
-RPI_PICO_PIO_DEFINE_PROGRAM(servo_pwm, 0, 6,
-	0x80a0, /*  0: pull   block           */
-	0x6030, /*  1: out    x, 16           */
-	0x6050, /*  2: out    y, 16           */
-	0xe001, /*  3: set    pins, 1         */
-	0x0044, /*  4: jmp    x--, 4          */
-	0xe000, /*  5: set    pins, 0         */
-	0x0086  /*  6: jmp    y--, 6          */
+RPI_PICO_PIO_DEFINE_PROGRAM(servo_pwm, 0, 8,
+	0xe081, /*  0: set    pindirs, 1   */
+	0x6050, /*  1: out    y, 16        */
+	0xe001, /*  2: set    pins, 1      */
+	0x0083, /*  3: jmp    y--, 3       */
+	0x6050, /*  4: out    y, 16        */
+	0xe000, /*  5: set    pins, 0      */
+	0x0086, /*  6: jmp    y--, 6       */
+	0x8080, /*  7: pull   noblock      */
+	0xa027  /*  8: mov    x, osr       */
 );
 
 static int servo_pio_set_cycles(const struct device *dev, uint32_t channel,
@@ -76,26 +91,15 @@ static int servo_pio_set_cycles(const struct device *dev, uint32_t channel,
 	uint32_t low = period - pulse;
 
 	/*
-	 * Overhead per cycle: pull(1) + out(1) + out(1) + set(1) + set(1) = 5
-	 * jmp x-- loop executes x+1 times (including the final failing jmp).
-	 * jmp y-- loop executes y+1 times.
-	 * Total cycle = 5 + (x+1) + (y+1) = x + y + 7
-	 * We want: pulse_actual = x+1+1(set_low) doesn't add — set is outside.
-	 *
-	 * Actually: pin high for set(1) + jmp_loop(x+1) = x+2 cycles.
-	 *           pin low for set(1) + jmp_loop(y+1) + pull(1) + 2*out(1) = y+5.
-	 * Total period = (x+2) + (y+5) = x + y + 7.
-	 *
-	 * Solving: x = pulse - 2, y = low - 5.
+	 * Pin-high cycles = N + 3 (PC=2 set + PC=3 loop iters + PC=4 out).
+	 * Pin-low  cycles = M + 6 (PC=5 set + PC=6 loop iters + PC=7 pull +
+	 *                          PC=8 mov + PC=0 set pindirs + PC=1 out).
+	 * Solving:  N = pulse - 3,  M = low - 6.
 	 */
-	uint32_t x = (pulse > 2) ? (pulse - 2) : 0;
-	uint32_t y = (low > 5) ? (low - 5) : 0;
+	uint32_t n = (pulse > 3) ? (pulse - 3) : 0;
+	uint32_t m = (low > 6)   ? (low - 6)   : 0;
+	uint32_t word = ((m & 0xFFFF) << 16) | (n & 0xFFFF);
 
-	/* Pack: bits[15:0]=x (pulse), bits[31:16]=y (low) */
-	uint32_t word = (y << 16) | (x & 0xFFFF);
-
-	/* Drain FIFO and write new value — ensures immediate update */
-	pio_sm_drain_tx_fifo(pio, data->sm);
 	pio_sm_put(pio, data->sm, word);
 
 	return 0;
